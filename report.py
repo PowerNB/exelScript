@@ -45,11 +45,44 @@ CONFIG = {
         "Бонусов+": "bonus_plus",
         "Бонусов-": "bonus_minus",
         "Объем": "liters",
-        "Основание": "reason"
+        "Основание": "reason",
+        "Станция": "azs_number",  # Номер АЗС из скриншота
+        "Марка": "fuel_mark"      # Марка топлива из скриншота
     },
     "NUMBER_FORMATS": {
         "financial": '#,##0.00',
         "rate": '0.00000000'
+    },
+    # === НАСТРОЙКИ ФИЛЬТРАЦИИ ===
+    "FILTERS": {
+        # Включить/выключить фильтрацию (True - включено, False - выключено)
+        "ENABLE_FILTERING": True,
+        
+        # Марки топлива для ИСКЛЮЧЕНИЯ из анализа (по коду)
+        # Раскомментируйте нужные строки для исключения марки
+        "EXCLUDE_FUEL_MARKS": [
+            # 14,  # Аи-92-К5
+            # 15,  # Аи-95-К5
+            # 17,  # ДТ-Л-К5
+            # 18,  # ГАЗ
+            # 19,  # Аи-95-К5PR
+            # 21,  # Аи100-К5PR
+        ],
+        
+        # Номера АЗС для ИСКЛЮЧЕНИЯ из анализа
+        # Добавьте номера АЗС, которые нужно исключить
+        "EXCLUDE_AZS": [
+            # 1118, # Пример
+        ],
+    },
+    # Справочник марок топлива для отчетности
+    "FUEL_MARKS_DICT": {
+        14: "Аи-92-К5",
+        15: "Аи-95-К5",
+        17: "ДТ-Л-К5",
+        18: "ГАЗ",
+        19: "Аи-95-К5PR",
+        21: "Аи100-К5PR"
     }
 }
 
@@ -71,7 +104,6 @@ def find_source_files(pattern):
     source_files = glob.glob(pattern)
     
     if not source_files:
-        # Попробуем найти в поддиректориях
         source_files = glob.glob(f"**/{pattern}", recursive=True)
     
     if not source_files:
@@ -80,7 +112,7 @@ def find_source_files(pattern):
         return []
     
     print(f"📁 Найдено файлов: {len(source_files)}")
-    for i, file in enumerate(source_files[:5], 1):  # Показываем первые 5 файлов
+    for i, file in enumerate(source_files[:5], 1):
         print(f"   {i}. {file}")
     
     if len(source_files) > 5:
@@ -91,10 +123,13 @@ def find_source_files(pattern):
 def load_excel_file(file_path, config):
     """Загрузка одного Excel файла."""
     try:
+        # Получаем список колонок для загрузки
+        cols_to_load = list(config["COLS_MAPPING"].keys())
+        
         df = pd.read_excel(
             file_path,
             sheet_name=config["SHEET_NAME_SOURCE"],
-            usecols=list(config["COLS_MAPPING"].keys()),
+            usecols=cols_to_load,
             engine="calamine" if Path(file_path).suffix == '.xlsx' else 'openpyxl'
         ).rename(columns=config["COLS_MAPPING"])
         
@@ -104,9 +139,110 @@ def load_excel_file(file_path, config):
         tqdm.write(f"   ✗ Ошибка в {Path(file_path).name}: {str(e)[:100]}...")
         return None
 
+def apply_filters(df, config):
+    """
+    Применяет фильтры для исключения марок топлива и АЗС.
+    Возвращает отфильтрованный DataFrame и статистику фильтрации.
+    """
+    if not config["FILTERS"]["ENABLE_FILTERING"]:
+        print("ℹ️  Фильтрация отключена (ENABLE_FILTERING = False)")
+        return df, {"filtered_rows": 0, "filtered_fuel": 0, "filtered_azs": 0}
+    
+    print("\n" + "="*70)
+    print("🔍 ПРИМЕНЕНИЕ ФИЛЬТРОВ")
+    print("="*70)
+    
+    initial_count = len(df)
+    stats = {
+        "filtered_rows": 0,
+        "filtered_fuel": 0,
+        "filtered_azs": 0,
+        "initial_count": initial_count
+    }
+    
+    # Создаем копию для фильтрации
+    df_filtered = df.copy()
+    
+    # === ФИЛЬТРАЦИЯ ПО МАРКАМ ТОПЛИВА ===
+    exclude_marks = config["FILTERS"]["EXCLUDE_FUEL_MARKS"]
+    if exclude_marks and "fuel_mark" in df_filtered.columns:
+        print("\n🚫 Фильтрация по маркам топлива:")
+        
+        # Преобразуем в числовой формат
+        df_filtered["fuel_mark"] = pd.to_numeric(df_filtered["fuel_mark"], errors="coerce")
+        
+        # Подсчет строк для исключения
+        fuel_mask = df_filtered["fuel_mark"].isin(exclude_marks)
+        stats["filtered_fuel"] = fuel_mask.sum()
+        
+        # Вывод информации о исключаемых марках
+        if stats["filtered_fuel"] > 0:
+            print(f"   Исключаемые марки:")
+            for mark_code in exclude_marks:
+                mark_name = config["FUEL_MARKS_DICT"].get(mark_code, f"Неизвестная ({mark_code})")
+                count = (df_filtered["fuel_mark"] == mark_code).sum()
+                if count > 0:
+                    bonus_sum = df_filtered[df_filtered["fuel_mark"] == mark_code]["bonus_plus"].sum()
+                    liters_sum = df_filtered[df_filtered["fuel_mark"] == mark_code]["liters"].sum()
+                    print(f"      • Марка {mark_code} ({mark_name}):")
+                    print(f"        - Строк: {count:,}")
+                    print(f"        - Бонусов начислено: {bonus_sum:,.2f}")
+                    print(f"        - Литров: {liters_sum:,.2f}")
+        
+        # Применяем фильтр
+        df_filtered = df_filtered[~fuel_mask].copy()
+        print(f"   ✅ Отфильтровано по маркам: {stats['filtered_fuel']:,} строк")
+    else:
+        if not exclude_marks:
+            print("\n✓ Фильтрация по маркам топлива не настроена (список пуст)")
+    
+    # === ФИЛЬТРАЦИЯ ПО НОМЕРАМ АЗС ===
+    exclude_azs = config["FILTERS"]["EXCLUDE_AZS"]
+    if exclude_azs and "azs_number" in df_filtered.columns:
+        print("\n🚫 Фильтрация по номерам АЗС:")
+        
+        # Преобразуем в числовой формат
+        df_filtered["azs_number"] = pd.to_numeric(df_filtered["azs_number"], errors="coerce")
+        
+        # Подсчет строк для исключения
+        azs_mask = df_filtered["azs_number"].isin(exclude_azs)
+        stats["filtered_azs"] = azs_mask.sum()
+        
+        # Вывод информации о исключаемых АЗС
+        if stats["filtered_azs"] > 0:
+            print(f"   Исключаемые АЗС:")
+            for azs_num in exclude_azs:
+                count = (df_filtered["azs_number"] == azs_num).sum()
+                if count > 0:
+                    bonus_sum = df_filtered[df_filtered["azs_number"] == azs_num]["bonus_plus"].sum()
+                    liters_sum = df_filtered[df_filtered["azs_number"] == azs_num]["liters"].sum()
+                    print(f"      • АЗС №{azs_num}:")
+                    print(f"        - Строк: {count:,}")
+                    print(f"        - Бонусов начислено: {bonus_sum:,.2f}")
+                    print(f"        - Литров: {liters_sum:,.2f}")
+        
+        # Применяем фильтр
+        df_filtered = df_filtered[~azs_mask].copy()
+        print(f"   ✅ Отфильтровано по АЗС: {stats['filtered_azs']:,} строк")
+    else:
+        if not exclude_azs:
+            print("\n✓ Фильтрация по АЗС не настроена (список пуст)")
+    
+    # === ОБЩАЯ СТАТИСТИКА ===
+    stats["filtered_rows"] = initial_count - len(df_filtered)
+    
+    print("\n" + "-"*70)
+    print("📊 ИТОГИ ФИЛЬТРАЦИИ:")
+    print(f"   • Исходных строк: {initial_count:,}")
+    print(f"   • Отфильтровано всего: {stats['filtered_rows']:,} ({stats['filtered_rows']/initial_count*100:.2f}%)")
+    print(f"   • Осталось для анализа: {len(df_filtered):,}")
+    print("="*70)
+    
+    return df_filtered, stats
+
 def validate_and_clean_data(df):
     """Валидация и очистка данных."""
-    print("🔍 Проверка данных...")
+    print("\n🔍 Проверка и очистка данных...")
     
     # Проверяем наличие обязательных колонок
     required_cols = ["date", "bonus_plus", "bonus_minus", "liters", "reason"]
@@ -149,7 +285,7 @@ def load_and_process_data(config):
     """Загружает данные из нескольких XLSX файлов, объединяет и очищает их."""
     source_files = find_source_files(config["SOURCE_PATTERN"])
     if not source_files:
-        return None
+        return None, None
     
     print("📥 Загрузка файлов...")
     all_data = []
@@ -161,20 +297,23 @@ def load_and_process_data(config):
     
     if not all_data:
         print("❌ Не удалось загрузить данные из файлов")
-        return None
+        return None, None
     
     # Объединение данных
     df = pd.concat(all_data, ignore_index=True, sort=False)
     print(f"📊 Всего строк объединено: {len(df):,}")
     
-    # Валидация и очистка
-    df = validate_and_clean_data(df)
+    # Применение фильтров ПЕРЕД валидацией
+    df_filtered, filter_stats = apply_filters(df, config)
     
-    return df
+    # Валидация и очистка
+    df_clean = validate_and_clean_data(df_filtered)
+    
+    return df_clean, filter_stats
 
 def calculate_report(df):
     """Выполняет агрегацию данных и расчет отчета."""
-    print("📊 Расчет показателей...")
+    print("\n📊 Расчет показателей...")
     
     # Создаем копию для безопасности
     df_clean = df.copy()
@@ -192,7 +331,7 @@ def calculate_report(df):
         "liters": "Продано литров с начислением бонусов"
     })
     
-    # ✨ НОВАЯ КОЛОНКА: Продано литров всего (включая без бонусов)
+    # Продано литров всего (включая без бонусов)
     total_liters = df_clean.groupby("period")["liters"].sum()
     report["Продано литров всего"] = total_liters
     
@@ -217,27 +356,20 @@ def calculate_report(df):
     try:
         report.index = report.index.strftime("%B %Y")
     except:
-        # Если локаль не русская, используем английские названия
         report.index = report.index.strftime("%B %Y")
     
     report = report.reset_index()
-    # Теперь колонка будет называться 'period' (из-за имени индекса)
-    # Переименовываем ее в 'Период'
     report = report.rename(columns={'period': 'Период'})
     
     return report
 
 def get_sheet_name_from_data(df_report):
-    """
-    Генерирует название листа: "Отчет за {первый месяц} - {последний месяц}"
-    """
+    """Генерирует название листа."""
     if len(df_report) == 0:
         return "Отчет"
     
-    # Проверяем, какое имя у колонки с периодами
     period_col = "Период"
     if period_col not in df_report.columns:
-        # Если колонка еще не переименована, ищем альтернативные имена
         if "period" in df_report.columns:
             period_col = "period"
         elif "index" in df_report.columns:
@@ -245,13 +377,11 @@ def get_sheet_name_from_data(df_report):
         else:
             return "Отчет"
     
-    # Берем первый и последний периоды
     first_period = df_report[period_col].iloc[0]
     last_period = df_report[period_col].iloc[-1]
     
     sheet_name = f"Отчет за {first_period} - {last_period}"
     
-    # Ограничение Excel на длину названия листа (31 символ)
     if len(sheet_name) > 31:
         first_month = first_period.split()[0]
         last_month = last_period.split()[0]
@@ -261,22 +391,16 @@ def get_sheet_name_from_data(df_report):
     return sheet_name
 
 def format_excel_file(file_path, sheet_name, config):
-    """
-    Применяет форматирование Excel:
-    - Автоширина колонок
-    - Перенос текста в заголовках
-    - Финансовый формат для числовых колонок
-    """
+    """Применяет форматирование Excel."""
     try:
         wb = load_workbook(file_path)
         
-        # Если лист существует
         if sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
         else:
             print(f"⚠️  Лист '{sheet_name}' не найден, используется активный лист")
             ws = wb.active
-            ws.title = sheet_name[:31]  # Ограничение длины названия
+            ws.title = sheet_name[:31]
         
         # Автоподбор ширины колонок
         for column in ws.columns:
@@ -293,7 +417,7 @@ def format_excel_file(file_path, sheet_name, config):
             adjusted_width = min(max_length + 2, 50)
             ws.column_dimensions[column_letter].width = adjusted_width
         
-        # Форматирование заголовков (первая строка)
+        # Форматирование заголовков
         for cell in ws[1]:
             cell.alignment = Alignment(
                 wrap_text=True,
@@ -301,17 +425,9 @@ def format_excel_file(file_path, sheet_name, config):
                 vertical='center',
                 shrink_to_fit=True
             )
-            # Жирный шрифт для заголовков
             cell.font = cell.font.copy(bold=True)
         
-        # ✅ ИСПРАВЛЕНИЕ: Финансовый формат для числовых колонок (B, C, D, E)
-        # A - "Период" (первая колонка)
-        # B - "Бонусов начислено"
-        # C - "Продано литров с начислением бонусов"
-        # D - "Продано литров всего"
-        # E - "Бонусов списано"
-        # F - "На 1 литр начислено бонусов"
-        
+        # Финансовый формат для числовых колонок
         financial_cols = {
             'B': 'Бонусов начислено', 
             'C': 'Продано литров с начислением бонусов',
@@ -324,15 +440,12 @@ def format_excel_file(file_path, sheet_name, config):
                     cell = ws[f"{col_letter}{row}"]
                     cell.number_format = config["NUMBER_FORMATS"]["financial"]
         
-        # Формат для колонки F (На 1 литр начислено бонусов)
+        # Формат для колонки F
         if 'F' in ws.column_dimensions:
             for row in range(2, ws.max_row + 1):
                 cell = ws[f"F{row}"]
                 cell.number_format = config["NUMBER_FORMATS"]["rate"]
         
-        # ✅ ИСПРАВЛЕНИЕ: Убрали выделение итоговой строки
-        
-        # Сохранение
         wb.save(file_path)
         print("✅ Форматирование применено успешно")
         
@@ -369,8 +482,8 @@ def main():
         input("Нажмите Enter для выхода...")
         sys.exit(1)
     
-    # Загрузка и обработка данных
-    df_raw = load_and_process_data(CONFIG)
+    # Загрузка и обработка данных (с применением фильтров)
+    df_raw, filter_stats = load_and_process_data(CONFIG)
     if df_raw is None:
         print("❌ Не удалось загрузить данные")
         input("Нажмите Enter для выхода...")
@@ -383,7 +496,6 @@ def main():
         input("Нажмите Enter для выхода...")
         sys.exit(1)
     
-    # ✅ ИСПРАВЛЕНИЕ: Убрали строку "ИТОГО" из отчета
     print(f"📊 Рассчитано периодов: {len(df_report)}")
     
     # Генерация названия листа
@@ -396,22 +508,20 @@ def main():
         create_backup(CONFIG["DST_FILE"])
     
     # Сохранение в Excel
-    print(f"📝 Сохранение в '{CONFIG['DST_FILE']}'...")
+    print(f"\n📝 Сохранение в '{CONFIG['DST_FILE']}'...")
     try:
         with pd.ExcelWriter(
             CONFIG["DST_FILE"],
             engine="openpyxl",
-            mode='w'  # Всегда создаем новый файл для чистоты
+            mode='w'
         ) as writer:
-            # Записываем основной отчет
             df_report.to_excel(
                 writer,
                 sheet_name=sheet_name,
-                index=False  # ✅ Не добавляем индекс (убрали колонку справа)
+                index=False
             )
             
-            # Дополнительно можно добавить лист с сырыми данными
-            if len(df_raw) < 10000:  # Если данных не слишком много
+            if len(df_raw) < 10000:
                 df_raw_sample = df_raw.head(1000).copy()
                 df_raw_sample["date"] = df_raw_sample["date"].dt.strftime("%d.%m.%Y %H:%M")
                 df_raw_sample.to_excel(
@@ -432,12 +542,18 @@ def main():
         print(f"📄 Файл: {CONFIG['DST_FILE']}")
         print(f"📋 Лист: {sheet_name}")
         print(f"📊 Периодов в отчете: {len(df_report)}")
-        print(f"📈 Всего начислено бонусов: {df_report['Бонусов начислено'].sum():,.2f}")
+        
+        if filter_stats:
+            print(f"\n🔍 Фильтрация:")
+            print(f"   • Исключено строк: {filter_stats.get('filtered_rows', 0):,}")
+            print(f"   • По маркам топлива: {filter_stats.get('filtered_fuel', 0):,}")
+            print(f"   • По номерам АЗС: {filter_stats.get('filtered_azs', 0):,}")
+        
+        print(f"\n📈 Всего начислено бонусов: {df_report['Бонусов начислено'].sum():,.2f}")
         print(f"📉 Всего списано бонусов: {df_report['Бонусов списано'].sum():,.2f}")
         print(f"⛽ Продано литров (с бонусами): {df_report['Продано литров с начислением бонусов'].sum():,.2f}")
         print(f"⛽ Продано литров (всего): {df_report['Продано литров всего'].sum():,.2f}")
         
-        # Расчет среднего показателя на 1 литр
         total_bonus = df_report['Бонусов начислено'].sum()
         total_liters_with_bonus = df_report['Продано литров с начислением бонусов'].sum()
         if total_liters_with_bonus > 0:
@@ -454,7 +570,6 @@ def main():
         print(f"❌ Ошибка при сохранении файла: {e}")
         print("Подсказка: Закройте файл Excel, если он открыт")
     
-    # Завершение программы
     input("\nНажмите Enter для выхода...")
 
 if __name__ == "__main__":
