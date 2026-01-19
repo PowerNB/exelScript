@@ -46,8 +46,8 @@ CONFIG = {
         "Бонусов-": "bonus_minus",
         "Объем": "liters",
         "Основание": "reason",
-        "Станция": "azs_number",  # Номер АЗС из скриншота
-        "Марка": "fuel_mark"      # Марка топлива из скриншота
+        "Станция": "azs_number",
+        "Марка": "fuel_mark"
     },
     "NUMBER_FORMATS": {
         "financial": '#,##0.00',
